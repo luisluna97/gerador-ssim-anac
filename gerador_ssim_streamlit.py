@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Gerador SSIM - ANAC API
+# Gerador SSIM - ANAC APi
 # Versão: 1.0.03
 # Data: 2025-06-09
 # Changelog:
