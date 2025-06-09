@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 # Gerador SSIM - ANAC API
-# Versão: 1.0.01
-# Data: 2024-12-01
+# Versão: 1.0.02
+# Data: 2024-12-13
 # Changelog:
 # v1.0.01 - Correção do espaçamento na repetição do código da companhia aérea
+# v1.0.02 - Correção formato SSIM: 4 linhas zeros, numeração sequencial, linha 5 correta
 
 import streamlit as st
 import requests
@@ -21,7 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Configuração da página ---
 st.set_page_config(
-    page_title="Gerador SSIM - ANAC API v1.0.01",
+    page_title="Gerador SSIM - ANAC API v1.0.02",
     page_icon="✈️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -277,8 +278,11 @@ def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_bra
             linha = item['ssimfile']
             if linha:
                 # Headers (linhas que começam com 1, 2, ou são zeros)
-                if linha.startswith(('1', '2', '0')):
+                if linha.startswith(('1', '2')):
                     linhas_header.append(linha)
+                elif linha.startswith('0'):
+                    # Pular linhas de zeros do header original
+                    continue
                 # Dados de voos (linhas que começam com 3)
                 elif linha.startswith('3 ') and len(linha) > 5:
                     if codigo_companhia == "TODAS":
@@ -292,8 +296,56 @@ def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_bra
                             linha_processada = converter_horario_ssim(linha, df_airports, converter_para_brasilia)
                             linhas_filtradas.append(linha_processada)
     
-    # Montar resultado: headers + dados filtrados
-    resultado = linhas_header + linhas_filtradas
+    # Agora vamos gerar o arquivo SSIM com formato correto
+    resultado = []
+    numero_linha = 1
+    
+    # Adicionar headers existentes
+    for header in linhas_header:
+        resultado.append(header)
+        numero_linha += 1
+    
+    # Adicionar 4 linhas de zeros após headers
+    for _ in range(4):
+        zeros_line = "0" * 200
+        resultado.append(zeros_line)
+        numero_linha += 1
+    
+    # Adicionar linhas de dados com numeração sequencial corrigida
+    for linha_data in linhas_filtradas:
+        # Renumerar linha mantendo formato de 200 caracteres
+        nova_linha = linha_data[:192] + f"{numero_linha:08}"  # Últimos 8 caracteres são o número da linha
+        resultado.append(nova_linha)
+        numero_linha += 1
+    
+    # Adicionar 4 linhas de zeros antes da linha 5
+    for _ in range(4):
+        zeros_line = "0" * 200
+        resultado.append(zeros_line)
+        numero_linha += 1
+    
+    # Adicionar linha 5 (final) com data atual e numeração
+    from datetime import datetime
+    data_emissao = datetime.now().strftime("%d%b%y").upper()
+    
+    # Obter código da companhia para linha 5
+    codigo_para_linha5 = codigo_companhia if codigo_companhia != "TODAS" else "XX"
+    if len(codigo_para_linha5) > 2:
+        codigo_para_linha5 = codigo_para_linha5[:2]
+    
+    linha_5_conteudo = f"5 {codigo_para_linha5} {data_emissao}"
+    
+    # Formato correto: número da última linha 3 + E + número da linha 5 atual
+    # numero_linha já está na linha 5, então a última linha 3 foi numero_linha - 5 (4 zeros + linha 5)
+    numero_ultima_linha3 = numero_linha - 5  # Última linha 3 antes dos 4 zeros
+    numero_linha_str_e = f"{numero_ultima_linha3:06}E"
+    numero_linha_str_final = f"{numero_linha:06}"
+    
+    # Calcular espaços para manter 200 caracteres
+    espacos_necessarios = 200 - len(linha_5_conteudo) - len(numero_linha_str_e) - len(numero_linha_str_final)
+    linha_5 = linha_5_conteudo + (' ' * espacos_necessarios) + numero_linha_str_e + numero_linha_str_final
+    resultado.append(linha_5)
+    
     return resultado
 
 def gerar_nome_arquivo(codigo_companhia, temporada, horario_brasilia=False):
@@ -310,7 +362,7 @@ def gerar_nome_arquivo(codigo_companhia, temporada, horario_brasilia=False):
 def main():
     st.title("✈️ Gerador de Arquivos SSIM")
     st.markdown("### Extrair dados de malha aérea da API da ANAC")
-    st.markdown("**Versão:** 1.0.01 | **Data:** 01/12/2024")
+    st.markdown("**Versão:** 1.0.02 | **Data:** 13/12/2024")
     
     # Sidebar
     with st.sidebar:
