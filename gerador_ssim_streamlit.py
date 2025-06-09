@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 # Gerador SSIM - ANAC API
-# Versão: 1.0.03
+# Versão: 1.0.05
 # Data: 2025-06-09
 # Changelog:
 # v1.0.01 - Correção do espaçamento na repetição do código da companhia aérea
 # v1.0.02 - Correção formato SSIM: 4 linhas zeros, numeração sequencial, linha 5 correta
 # v1.0.03 - Correção data + 4 linhas zeros entre linha 1 e 2 + melhoria campos linha 3
+# v1.0.04 - PRESERVAÇÃO 100% DADOS ORIGINAIS ANAC - removidas modificações nos campos
+# v1.0.05 - ADAPTAÇÃO PADRÃO SSIM GOL - melhoria campos onward carriage e service information
 
 import streamlit as st
 import requests
@@ -23,7 +25,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Configuração da página ---
 st.set_page_config(
-    page_title="Gerador SSIM - ANAC API v1.0.03",
+    page_title="Gerador SSIM - ANAC API v1.0.05",
     page_icon="✈️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -331,8 +333,97 @@ def melhorar_campo_informacoes_linha3(linha_ssim):
     
     return linha_melhorada
 
-def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_brasilia=False, df_airports=None):
-    """Filtra dados SSIM por código da companhia aérea e opcionalmente converte horários"""
+def adaptar_para_padrao_ssim_gol(linha_ssim):
+    """
+    Adapta dados da ANAC para padrão SSIM da GOL, melhorando campos obrigatórios
+    """
+    if not linha_ssim.startswith('3 '):
+        return linha_ssim
+    
+    try:
+        # Extrair informações básicas
+        codigo_cia = linha_ssim[2:4].strip()
+        
+        # Encontrar posição do tipo de aeronave (geralmente posição ~105-115)
+        tipo_aeronave = ""
+        for i in range(100, min(120, len(linha_ssim)-3)):
+            if linha_ssim[i:i+3].strip() and linha_ssim[i:i+3].isalnum():
+                tipo_aeronave = linha_ssim[i:i+3].strip()
+                break
+        
+        if not tipo_aeronave:
+            tipo_aeronave = "320"  # Default
+        
+        # Melhoria 1: Campo Onward Carriage (posição ~120-140)
+        # Formato ANAC: "LA 0707"
+        # Formato GOL:  "G3       G3 1007"
+        
+        # Encontrar campo onward carriage atual
+        padrao_onward = f"{codigo_cia} \\d{{4}}"
+        match_onward = re.search(padrao_onward, linha_ssim)
+        
+        if match_onward:
+            campo_onward_original = match_onward.group(0)
+            numero_voo = campo_onward_original.split()[1]
+            
+            # Criar novo campo no padrão GOL: "G3       G3 1007"
+            novo_campo_onward = f"{codigo_cia}{' ' * 7}{codigo_cia} {numero_voo}"
+            
+            # Localizar posição para substituição
+            pos_onward = linha_ssim.find(campo_onward_original)
+            if pos_onward > 0:
+                # Calcular espaços antes para manter 200 caracteres
+                espacos_antes = 120  # Posição aproximada do campo onward
+                linha_parte1 = linha_ssim[:espacos_antes]
+                linha_parte2 = linha_ssim[pos_onward + len(campo_onward_original):]
+                
+                # Reconstruir linha
+                linha_ssim = linha_parte1 + novo_campo_onward + linha_parte2
+        
+        # Melhoria 2: Campo Service Information (posição ~170-190)
+        # Formato ANAC: "000"
+        # Formato GOL:  "Y138VVG373G"
+        
+        # Procurar campo de service information (geralmente "000" ou "Y...")
+        padrao_service = r'(000|Y\d+)'
+        match_service = re.search(padrao_service, linha_ssim[150:])
+        
+        if match_service:
+            campo_service_original = match_service.group(0)
+            
+            # Criar novo campo no padrão GOL
+            if tipo_aeronave in ['73G', '73X', '738']:
+                configuracao = "138" if tipo_aeronave == '73G' else "186"
+            elif tipo_aeronave in ['320', '321', '319']:
+                configuracao = "180" if tipo_aeronave == '320' else "224"
+            elif tipo_aeronave in ['789', '788']:
+                configuracao = "304"
+            else:
+                configuracao = "180"  # Default
+            
+            novo_campo_service = f"Y{configuracao}VV{tipo_aeronave}{codigo_cia}"
+            
+            # Localizar e substituir
+            pos_service = linha_ssim.rfind(campo_service_original)
+            if pos_service > 0:
+                linha_antes = linha_ssim[:pos_service]
+                linha_depois = linha_ssim[pos_service + len(campo_service_original):]
+                linha_ssim = linha_antes + novo_campo_service + linha_depois
+        
+        # Garantir 200 caracteres exatos
+        if len(linha_ssim) > 200:
+            linha_ssim = linha_ssim[:200]
+        elif len(linha_ssim) < 200:
+            linha_ssim = linha_ssim + ' ' * (200 - len(linha_ssim))
+        
+        return linha_ssim
+        
+    except Exception:
+        # Em caso de erro, retorna linha original
+        return linha_ssim
+
+def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_brasilia=False, df_airports=None, adaptar_ssim_gol=False):
+    """Filtra dados SSIM por código da companhia aérea com opção de adaptação para padrão SSIM GOL"""
     linhas_filtradas = []
     linhas_header = []
     
@@ -350,14 +441,30 @@ def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_bra
                 # Dados de voos (linhas que começam com 3)
                 elif linha.startswith('3 ') and len(linha) > 5:
                     if codigo_companhia == "TODAS":
-                        # Se for "TODAS", incluir todas as linhas de dados
-                        linha_processada = converter_horario_ssim(linha, df_airports, converter_para_brasilia)
+                        # Se for "TODAS", incluir todas as linhas
+                        linha_processada = linha  # ✅ DADOS ORIGINAIS DA ANAC
+                        
+                        # Aplicar conversões se solicitadas
+                        if converter_para_brasilia:
+                            linha_processada = converter_horario_ssim(linha_processada, df_airports, True)
+                        
+                        if adaptar_ssim_gol:
+                            linha_processada = adaptar_para_padrao_ssim_gol(linha_processada)
+                        
                         linhas_filtradas.append(linha_processada)
                     else:
                         # Filtrar por companhia específica
                         codigo_linha = linha[2:4].strip()
                         if codigo_linha == codigo_companhia:
-                            linha_processada = converter_horario_ssim(linha, df_airports, converter_para_brasilia)
+                            linha_processada = linha  # ✅ DADOS ORIGINAIS DA ANAC
+                            
+                            # Aplicar conversões se solicitadas
+                            if converter_para_brasilia:
+                                linha_processada = converter_horario_ssim(linha_processada, df_airports, True)
+                            
+                            if adaptar_ssim_gol:
+                                linha_processada = adaptar_para_padrao_ssim_gol(linha_processada)
+                            
                             linhas_filtradas.append(linha_processada)
     
     # Agora vamos gerar o arquivo SSIM com formato correto
@@ -378,10 +485,8 @@ def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_bra
     
     # Adicionar linhas de dados com numeração sequencial corrigida
     for linha_data in linhas_filtradas:
-        # Melhorar campo de informações adicionais (posição ~150-170)
-        linha_melhorada = melhorar_campo_informacoes_linha3(linha_data)
-        # Renumerar linha mantendo formato de 200 caracteres
-        nova_linha = linha_melhorada[:192] + f"{numero_linha:08}"  # Últimos 8 caracteres são o número da linha
+        # ✅ PRESERVAR DADOS (com melhorias se solicitadas) - apenas renumerar
+        nova_linha = linha_data[:192] + f"{numero_linha:08}"  # Últimos 8 caracteres são o número da linha
         resultado.append(nova_linha)
         numero_linha += 1
     
@@ -415,21 +520,22 @@ def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_bra
     
     return resultado
 
-def gerar_nome_arquivo(codigo_companhia, temporada, horario_brasilia=False):
+def gerar_nome_arquivo(codigo_companhia, temporada, horario_brasilia=False, padrao_gol=False):
     """Gera nome do arquivo baseado na companhia e temporada"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     sufixo_horario = "_HORARIO_BRASILIA" if horario_brasilia else "_HORARIO_LOCAL"
+    sufixo_padrao = "_PADRAO_SSIM_GOL" if padrao_gol else "_PADRAO_ANAC"
     
     if codigo_companhia == "TODAS":
-        return f"ssim_TODAS_COMPANHIAS_{temporada}{sufixo_horario}_{timestamp}.ssim"
+        return f"ssim_TODAS_COMPANHIAS_{temporada}{sufixo_horario}{sufixo_padrao}_{timestamp}.ssim"
     else:
-        return f"ssim_{codigo_companhia}_{temporada}{sufixo_horario}_{timestamp}.ssim"
+        return f"ssim_{codigo_companhia}_{temporada}{sufixo_horario}{sufixo_padrao}_{timestamp}.ssim"
 
 # --- Interface Streamlit ---
 def main():
     st.title("✈️ Gerador de Arquivos SSIM")
     st.markdown("### Extrair dados de malha aérea da API da ANAC")
-    st.markdown("**Versão:** 1.0.03 | **Data:** 09/06/2025")
+    st.markdown("**Versão:** 1.0.05 | **Data:** 09/06/2025")
     
     # Sidebar
     with st.sidebar:
@@ -456,6 +562,22 @@ def main():
         if converter_horarios:
             st.info("⚠️ **Atenção:** Os horários serão convertidos para UTC-3 (Brasília). Verifique se esta é a opção desejada.")
         
+        # Nova opção: Padrão SSIM
+        st.markdown("---")
+        st.markdown("### ✈️ Padrão SSIM")
+        
+        padrao_ssim = st.radio(
+            "Formato dos campos SSIM:",
+            options=[False, True],
+            format_func=lambda x: "📊 Dados originais ANAC (preservar 100%)" if not x else "🔧 Adaptar para padrão SSIM GOL (onward carriage + service info)",
+            help="Escolha entre manter os dados exatamente como a ANAC envia ou adaptar para padrão SSIM da GOL"
+        )
+        
+        if padrao_ssim:
+            st.info("🔧 **Melhorias ativadas:**\n- Campo Onward Carriage: `G3       G3 1007`\n- Service Information: `Y138VVG373G`")
+        else:
+            st.info("📊 **Dados preservados:**\n- Campo Onward: `LA 0707`\n- Service Info: `000`")
+        
         # Botão para carregar dados
         if st.button("🔄 Carregar Dados da API", type="primary"):
             if temporada:
@@ -478,6 +600,8 @@ def main():
         **📍 Horários locais:** Cada aeroporto mantém seu fuso horário original (padrão SSIM internacional).
         
         **🇧🇷 Horário de Brasília:** Todos os horários convertidos para UTC-3 (facilita análises nacionais).
+        
+        **🔧 Padrão SSIM GOL:** Adapta campos para formato compatível com sistemas SSIM padrão.
         
         **🕐 Formato:** HHMM seguido do offset UTC (ex: 1430-0300 = 14:30 UTC-3)
         
@@ -534,7 +658,8 @@ def main():
                     st.session_state['dados_api'], 
                     codigo_selecionado,
                     converter_horarios,
-                    df_airports
+                    df_airports,
+                    padrao_ssim  # Nova opção
                 )
                 
                 st.success(f"✅ **Dados filtrados para {opcoes_companhias[companhia_selecionada]}**")
@@ -544,6 +669,11 @@ def main():
                     st.info("🇧🇷 **Horários convertidos para horário de Brasília (UTC-3)**")
                 else:
                     st.info("🌍 **Horários mantidos em fuso local de cada aeroporto**")
+                
+                if padrao_ssim:
+                    st.info("🔧 **Dados adaptados para padrão SSIM GOL**")
+                else:
+                    st.info("📊 **Dados preservados no formato original ANAC**")
                 
                 # Preview dos dados
                 if dados_filtrados:
@@ -568,51 +698,48 @@ def main():
                                     if not resultado.empty:
                                         nome_cia = resultado.iloc[0]['Airline Name']
                                 st.write(f"**{cia}** - {nome_cia}: {count} voos")
-                
-                # Botão de download
-                if dados_filtrados:
-                    conteudo_ssim = "\n".join(dados_filtrados)
-                    nome_arquivo = gerar_nome_arquivo(
-                        codigo_selecionado, 
-                        st.session_state.get('temporada_atual', 'UNK'),
-                        converter_horarios
-                    )
+                    
+                    # Botão para baixar
+                    arquivo_ssim = "\n".join(dados_filtrados)
+                    nome_arquivo = gerar_nome_arquivo(codigo_selecionado, st.session_state.get('temporada_atual', 'TEMP'), converter_horarios, padrao_ssim)
                     
                     st.download_button(
-                        label="📥 Baixar arquivo SSIM",
-                        data=conteudo_ssim.encode('latin-1'),
+                        label="📥 Baixar Arquivo SSIM",
+                        data=arquivo_ssim,
                         file_name=nome_arquivo,
                         mime="text/plain",
-                        help=f"Baixar arquivo SSIM filtrado para {opcoes_companhias[companhia_selecionada]}",
-                        use_container_width=True
+                        help="Clique para baixar o arquivo SSIM filtrado"
                     )
-    
+                    
+                    # Informações do arquivo
+                    st.markdown("---")
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        st.metric("📄 Total de linhas", len(dados_filtrados))
+                    
+                    with col2:
+                        st.metric("💾 Tamanho aproximado", f"{len(arquivo_ssim) // 1024} KB")
+                    
+                    with col3:
+                        if codigo_selecionado != "TODAS":
+                            voos_dados = len([l for l in dados_filtrados if l.startswith('3 ')])
+                            st.metric("✈️ Voos encontrados", voos_dados)
+                else:
+                    st.warning("⚠️ Nenhum dado encontrado para os filtros selecionados")
+        else:
+            st.warning("⚠️ Nenhuma companhia encontrada nos dados carregados")
     else:
-        st.info("👈 Use o painel lateral para carregar os dados da API")
+        st.info("👆 **Para começar:** Digite uma temporada na barra lateral e clique em 'Carregar Dados da API'")
         
-        # Informações sobre o sistema
+        st.markdown("---")
+        st.markdown("### 📖 **Como usar:**")
         st.markdown("""
-        ## 📖 Como usar:
-        
-        1. **Digite a temporada** no campo lateral (ex: W25, S25)
-        2. **Escolha o formato de horários** (local ou Brasília)
-        3. **Clique em "Carregar Dados"** para consultar a API da ANAC
-        4. **Selecione a companhia aérea** desejada na lista ou "TODAS" para malha completa
-        5. **Faça o download** do arquivo SSIM personalizado
-        
-        ## ℹ️ Sobre os dados:
-        
-        - **📍 Horários locais:** Fuso local de cada aeroporto (padrão SSIM)
-        - **🇧🇷 Horário de Brasília:** Todos convertidos para UTC-3
-        - **📊 Fonte:** API SIROS da ANAC
-        - **📋 Formato:** SSIM (Standard Schedules Information Manual)
-        - **💾 Encoding:** Latin-1 (padrão para arquivos SSIM)
-        - **🔄 Conteúdo:** Malha aérea filtrada por companhia ou completa
-        
-        ## 🔗 Links úteis:
-        
-        - [API ANAC](https://sas.anac.gov.br/sas/siros_api/ssimfile)
-        - [Formato SSIM](https://www.iata.org/en/publications/manuals/ssim/)
+        1. **Digite a temporada** na barra lateral (ex: W25, S25)
+        2. **Configure as opções** de horário e formato SSIM
+        3. **Clique em 'Carregar Dados da API'** 
+        4. **Selecione uma companhia** aérea
+        5. **Baixe o arquivo SSIM** gerado
         """)
 
 if __name__ == "__main__":
