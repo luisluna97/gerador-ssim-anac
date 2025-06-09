@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # Gerador SSIM - ANAC API
-# Versão: 1.0.02
-# Data: 2024-12-13
+# Versão: 1.0.03
+# Data: 2025-06-09
 # Changelog:
 # v1.0.01 - Correção do espaçamento na repetição do código da companhia aérea
 # v1.0.02 - Correção formato SSIM: 4 linhas zeros, numeração sequencial, linha 5 correta
+# v1.0.03 - Correção data + 4 linhas zeros entre linha 1 e 2 + melhoria campos linha 3
 
 import streamlit as st
 import requests
@@ -22,7 +23,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Configuração da página ---
 st.set_page_config(
-    page_title="Gerador SSIM - ANAC API v1.0.02",
+    page_title="Gerador SSIM - ANAC API v1.0.03",
     page_icon="✈️",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -267,6 +268,69 @@ def extrair_companhias_do_ssim(dados_json):
     
     return sorted(list(companhias))
 
+def melhorar_campo_informacoes_linha3(linha_ssim):
+    """
+    Melhora o campo de informações adicionais da linha 3 seguindo padrão SSIM
+    Exemplo: Y312 -> Y138VVG373G (baseado no padrão GOL)
+    """
+    if not linha_ssim.startswith('3 '):
+        return linha_ssim
+    
+    # Extrair informações da linha
+    codigo_cia = linha_ssim[2:4].strip()  # Posição 2-3: código da companhia
+    
+    # Encontrar posição do campo de aeronave (geralmente após os aeroportos e horários)
+    # No formato SSIM, o tipo de aeronave está por volta da posição 100-110
+    tipo_aeronave = ""
+    for i in range(100, min(120, len(linha_ssim)-3)):
+        if linha_ssim[i:i+3].strip() and linha_ssim[i:i+3].isalnum():
+            tipo_aeronave = linha_ssim[i:i+3].strip()
+            break
+    
+    # Localizar campo atual de informações (geralmente contém Y seguido de números)
+    campo_info_atual = ""
+    pos_campo_info = -1
+    for i in range(150, min(180, len(linha_ssim)-10)):
+        if linha_ssim[i] == 'Y' and linha_ssim[i+1:i+4].isdigit():
+            # Encontrou campo que começa com Y seguido de números
+            # Extrair até encontrar espaços ou fim
+            j = i
+            while j < len(linha_ssim) and linha_ssim[j] not in [' ', '\t']:
+                j += 1
+            campo_info_atual = linha_ssim[i:j]
+            pos_campo_info = i
+            break
+    
+    if pos_campo_info == -1:
+        return linha_ssim  # Não encontrou campo para melhorar
+    
+    # Criar novo campo de informações baseado no padrão SSIM
+    # Formato: Y + configuração + código aeronave + código companhia
+    configuracao_base = campo_info_atual[1:] if len(campo_info_atual) > 1 else "312"
+    
+    # Se a configuração é muito curta, expandir baseada no tipo de aeronave
+    if len(configuracao_base) < 3:
+        configuracao_base = "312"  # Padrão básico
+    
+    # Criar campo melhorado: Y + config + aeronave_info + companhia
+    if tipo_aeronave:
+        # Adicionar informações como no padrão GOL: Y138VVG373G
+        novo_campo_info = f"Y{configuracao_base}VV{tipo_aeronave}{codigo_cia}"
+    else:
+        # Padrão básico se não encontrar aeronave
+        novo_campo_info = f"Y{configuracao_base}VV{codigo_cia}"
+    
+    # Substituir na linha, mantendo mesmo tamanho
+    tamanho_original = len(campo_info_atual)
+    if len(novo_campo_info) > tamanho_original:
+        novo_campo_info = novo_campo_info[:tamanho_original]
+    elif len(novo_campo_info) < tamanho_original:
+        novo_campo_info = novo_campo_info + ' ' * (tamanho_original - len(novo_campo_info))
+    
+    linha_melhorada = linha_ssim[:pos_campo_info] + novo_campo_info + linha_ssim[pos_campo_info + tamanho_original:]
+    
+    return linha_melhorada
+
 def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_brasilia=False, df_airports=None):
     """Filtra dados SSIM por código da companhia aérea e opcionalmente converte horários"""
     linhas_filtradas = []
@@ -300,21 +364,24 @@ def filtrar_dados_por_companhia(dados_json, codigo_companhia, converter_para_bra
     resultado = []
     numero_linha = 1
     
-    # Adicionar headers existentes
-    for header in linhas_header:
+    # Adicionar headers existentes com zeros entre linha 1 e 2
+    for i, header in enumerate(linhas_header):
         resultado.append(header)
         numero_linha += 1
-    
-    # Adicionar 4 linhas de zeros após headers
-    for _ in range(4):
-        zeros_line = "0" * 200
-        resultado.append(zeros_line)
-        numero_linha += 1
+        
+        # Se for a primeira linha (linha 1), adicionar 4 linhas de zeros
+        if i == 0:  # Após a primeira linha (linha 1)
+            for _ in range(4):
+                zeros_line = "0" * 200
+                resultado.append(zeros_line)
+                numero_linha += 1
     
     # Adicionar linhas de dados com numeração sequencial corrigida
     for linha_data in linhas_filtradas:
+        # Melhorar campo de informações adicionais (posição ~150-170)
+        linha_melhorada = melhorar_campo_informacoes_linha3(linha_data)
         # Renumerar linha mantendo formato de 200 caracteres
-        nova_linha = linha_data[:192] + f"{numero_linha:08}"  # Últimos 8 caracteres são o número da linha
+        nova_linha = linha_melhorada[:192] + f"{numero_linha:08}"  # Últimos 8 caracteres são o número da linha
         resultado.append(nova_linha)
         numero_linha += 1
     
@@ -362,7 +429,7 @@ def gerar_nome_arquivo(codigo_companhia, temporada, horario_brasilia=False):
 def main():
     st.title("✈️ Gerador de Arquivos SSIM")
     st.markdown("### Extrair dados de malha aérea da API da ANAC")
-    st.markdown("**Versão:** 1.0.02 | **Data:** 13/12/2024")
+    st.markdown("**Versão:** 1.0.03 | **Data:** 09/06/2025")
     
     # Sidebar
     with st.sidebar:
